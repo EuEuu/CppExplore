@@ -9,6 +9,9 @@
 #include <chrono>
 #include <queue>
 #include <thread>
+#include <memory>
+#include <list>
+#include <functional>
 
 class ThreadPool
 {
@@ -28,17 +31,55 @@ public:
 		std::chrono::seconds timeout;
 	};
 
+	//线程的种类标识
+	enum class ThreadFlag {
+		kInit = 0,
+		kCore = 1,//核心线程
+		kCache = 2,//Cache线程 内部为了执行更多任务零时创建出来的
+	};
+
+	//线程的状态
+	enum class ThreadState {
+		kInit = 0,
+		kWaiting = 1,//等待
+		kRuning = 2,//运行中
+		kStop = 3,//停止
+	};
+
+	//线程池中线程存在的基本单位，每个线程都有自定义的ID、种类标识和状态
+	struct ThreadWrapper {
+		std::shared_ptr<std::thread> sptr{ nullptr };
+		std::atomic_int id{ 0 };
+		ThreadFlag flag;
+		ThreadState state;
+	};
+
+	using sptr = std::shared_ptr<ThreadPool>;
+
 	explicit ThreadPool(ThreadPoolConfig config);
+
+	static sptr make(ThreadPoolConfig config);
 
 	~ThreadPool();
 
 	static bool IsValidConfig(ThreadPoolConfig config);
 
+	bool IsValidConfig() const;
+
+	bool Start();
+
+	void AddThread(int id, ThreadFlag);
 private:
-	 
-	bool IsValidConfig();
+
+	int GetNextThreadId();
 
 private:
 	ThreadPoolConfig config_;
 	bool is_valid_config_;
+	std::atomic_int thread_id_;
+
+	std::list<std::shared_ptr<ThreadWrapper>> worker_threads_;
+	
+	//std::function是一种通用、多态的函数封装
+	std::queue<std::function<void()>> tasks_;
 };
