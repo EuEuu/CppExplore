@@ -11,6 +11,9 @@
 #include <thread>
 #include <memory>
 #include <list>
+#include <atomic>
+#include <future>
+#include <mutex>
 #include <functional>
 
 class ThreadPool
@@ -49,7 +52,7 @@ public:
 	//线程池中线程存在的基本单位，每个线程都有自定义的ID、种类标识和状态
 	struct ThreadWrapper {
 		std::shared_ptr<std::thread> sptr{ nullptr };
-		std::atomic_int id{ 0 };
+		std::atomic<int> id{ 0 };
 		ThreadFlag flag;
 		ThreadState state;
 	};
@@ -68,10 +71,60 @@ public:
 
 	bool Start();
 
-	void AddThread(int id, ThreadFlag);
+	void Shutdown(bool is_now);
+
+	//放任务进线程池
+	//...Args 为可变模板参数
+	//decltype(表达式)
+	//std::future提供了异步访问操作结果的机制
+	//用到了尾返回类型推导
+	template<typename F,typename ...Args>
+	auto Run(F&& f, Args&& ...args) -> std::shared_ptr<std::future<decltype(f(args...))>> {
+		if (is_shudown_ || is_shutdown_now_ || !IsAvailable())return nullptr;
+		if (GetWaitingThreadSize() == 0 && GetTotalThreadSize() < config_.core_threads) {
+			AddThread(GetNextThreadId(), ThreadFlag::kCache);
+		}
+
+		//连接函数和参数定义，特殊函数类型，避免左右值错误
+		//std::function 函数包装器 可将普通函数、lambda函数、std::bind和成员函数进行包装
+		//std::forward 称为完美转发，将会完整保留参数的引用类型进行转发
+		std::function<decltype(f(args...))()> func = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
+
+		auto task_ptr = std::make_shared<std::packaged_task<decltype(f(args...))()>>(func);
+
+		std::function<void()> warpper_func = [task_ptr] {
+			(*task_ptr)();
+		};
+
+		total_function_num_++;
+
+		{
+			std::unique_lock<std::mutex> lock(task_mtx_);
+			tasks_.emplace(warpper_func);
+			cv_.notify_one();
+		}
+
+		return std::make_shared<std::future<decltype(f(args...))>>(std::move(task_ptr->get_future()));
+	}
+
+	// 获取正在处于等待状态的线程的个数
+	int GetWaitingThreadSize() const { return this->waiting_thread_num_.load(); }
+
+	// 获取线程池中当前线程的总个数
+	int GetTotalThreadSize() const { return this->worker_threads_.size(); }
+
+	// 获取当前线程池已经执行过的函数个数
+	int GetRunnedFuncNum() const { return total_function_num_.load(); }
+
+	// 当前线程池是否可用
+	bool IsAvailable() { return is_available_.load(); }
 private:
 
 	int GetNextThreadId();
+
+	void AddThread(int id, ThreadFlag);
+
+	void Resize(int thread_num);
 
 private:
 	ThreadPoolConfig config_;
@@ -79,7 +132,16 @@ private:
 	std::atomic_int thread_id_;
 
 	std::list<std::shared_ptr<ThreadWrapper>> worker_threads_;
-	
+
 	//std::function是一种通用、多态的函数封装
-	std::queue<std::function<void()>> tasks_;
+	std::queue<std::function<void()>> tasks_;//任务队列
+	std::mutex task_mtx_;//锁住任务队列
+	std::condition_variable cv_;//信号量
+
+	std::atomic<int> waiting_thread_num_;
+	std::atomic<int> total_function_num_;
+
+	std::atomic_bool is_shudown_;
+	std::atomic_bool is_shutdown_now_;
+	std::atomic<bool> is_available_;
 };
